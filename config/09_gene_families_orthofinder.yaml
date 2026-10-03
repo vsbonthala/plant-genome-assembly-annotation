@@ -1,0 +1,20 @@
+# Workflow 09 - gene families (orthogroups) with OrthoFinder
+# -----------------------------------------------------------------------------
+# One protein FASTA per genome, haplotype or species: name -> path.
+# The name becomes the species name in all OrthoFinder results.
+# Final protein sets from workflow 06 can be listed directly, together with
+# proteomes of other species (e.g. outgroups or references).
+proteomes:
+  sampleA_H1: "results/06_functional_annotation/sampleA/H1/sampleA_H1.all.nonTE.proteins.fa"
+  sampleA_H2: "results/06_functional_annotation/sampleA/H2/sampleA_H2.all.nonTE.proteins.fa"
+  # reference: "data/proteomes/reference.fa"
+
+outdir: "results/09_gene_families_orthofinder"
+
+orthofinder:
+  run_name: "PlantGeneFamilies"   # -n: suffix of the results folder
+  # -y : split paralogous clades below the root of a HOG into separate HOGs
+  # -z : do not trim the multiple sequence alignments
+  extra: "-y -z"
+  threads: 40
+  mem_mb: 200000

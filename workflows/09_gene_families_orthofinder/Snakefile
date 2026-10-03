@@ -1,0 +1,83 @@
+# =============================================================================
+# Workflow 09 - gene families (orthogroups) with OrthoFinder
+# =============================================================================
+#   protein FASTA per genome / haplotype / species
+#     -> stage proteomes   one file per species in a clean input folder
+#                          (OrthoFinder takes species names from file names)
+#     -> OrthoFinder       all-vs-all search, orthogroups, gene trees,
+#                          species tree, hierarchical orthogroups (HOGs),
+#                          orthologues, gene duplication events, statistics
+#
+# Run from the repository root:
+#   snakemake -s workflows/09_gene_families_orthofinder/Snakefile \
+#             --configfile config/09_gene_families_orthofinder.yaml \
+#             --use-conda --cores 40
+# Help: workflows/09_gene_families_orthofinder/README.md
+# =============================================================================
+
+import os
+
+configfile: "config/09_gene_families_orthofinder.yaml"
+
+PROTEOMES = config["proteomes"]
+OUT = config["outdir"]
+O = config["orthofinder"]
+
+PROT_DIR = f"{OUT}/proteomes"
+RESULTS = f"{PROT_DIR}/OrthoFinder/Results_{O['run_name']}"
+
+wildcard_constraints:
+    species="|".join(PROTEOMES),
+
+
+rule all:
+    input:
+        f"{RESULTS}/Orthogroups/Orthogroups.tsv",
+        f"{RESULTS}/Orthogroups/Orthogroups.GeneCount.tsv",
+        f"{RESULTS}/Phylogenetic_Hierarchical_Orthogroups/N0.tsv",
+        f"{RESULTS}/Species_Tree/SpeciesTree_rooted.txt",
+        f"{RESULTS}/Comparative_Genomics_Statistics/Statistics_Overall.tsv",
+
+
+rule stage_proteome:
+    """Copy each proteome into the OrthoFinder input folder as <species>.fa."""
+    input:
+        fa=lambda w: PROTEOMES[w.species],
+    output:
+        fa=f"{PROT_DIR}/{{species}}.fa",
+    shell:
+        "cp {input.fa} {output.fa}"
+
+
+rule orthofinder:
+    """Orthogroups, gene and species trees, HOGs and orthologues."""
+    input:
+        expand(f"{PROT_DIR}/{{species}}.fa", species=PROTEOMES),
+    output:
+        og=f"{RESULTS}/Orthogroups/Orthogroups.tsv",
+        counts=f"{RESULTS}/Orthogroups/Orthogroups.GeneCount.tsv",
+        hogs=f"{RESULTS}/Phylogenetic_Hierarchical_Orthogroups/N0.tsv",
+        tree=f"{RESULTS}/Species_Tree/SpeciesTree_rooted.txt",
+        stats=f"{RESULTS}/Comparative_Genomics_Statistics/Statistics_Overall.tsv",
+    params:
+        prot_dir=PROT_DIR,
+        results=RESULTS,
+        run_name=O["run_name"],
+        extra=O["extra"],
+    log:
+        f"{OUT}/orthofinder.log",
+    benchmark:
+        f"{OUT}/orthofinder.benchmark.tsv"
+    threads: O["threads"]
+    resources:
+        mem_mb=O["mem_mb"],
+    conda:
+        "../../envs/orthofinder.yaml"
+    shell:
+        """
+        # OrthoFinder never overwrites: a leftover results folder from an
+        # interrupted run would make it write to Results_<name>_1 instead.
+        rm -rf {params.results}
+        orthofinder -t {threads} -n {params.run_name} {params.extra} \
+            -f {params.prot_dir} &> {log}
+        """

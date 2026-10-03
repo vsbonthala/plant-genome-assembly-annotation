@@ -1,0 +1,30 @@
+# Workflow 05 - per-haplotype finishing and ab initio gene prediction
+# -----------------------------------------------------------------------------
+samples:
+  - sampleA
+
+# Haplotype labels and the integer haplotype IDs required by PanSN-spec.
+haplotypes: ["H1", "H2", "H3", "H4"]
+pansn_hap_ids: {H1: 1, H2: 2, H3: 3, H4: 4}
+pansn_delim: "#"
+
+# Expected number of chromosomes (sanity check only; mismatches are logged).
+n_chrom: 12
+
+# Reference-guided scaffolds, one per sample and haplotype
+# (e.g. RagTag `ragtag.scaffold.fasta` restricted to nuclear sequence).
+scaffolds: "data/scaffolds/{sample}/{hap}/ragtag.scaffold.nuclear.fa"
+
+outdir: "results/05_finishing_helixer"
+
+helixer:
+  # Helixer is GPU-bound and usually installed from its container or a
+  # Python virtualenv (see https://github.com/weberlab-hhu/Helixer).
+  # `setup` runs before the command, e.g.
+  #   "set +u; source /path/to/helixer/bin/activate; set -u"
+  # (set +u/-u because activation scripts reference unset variables, which
+  # Snakemake's strict bash mode would otherwise reject).
+  setup: ""
+  cmd: "Helixer.py"
+  lineage: "land_plant"
+  threads: 16

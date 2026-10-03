@@ -1,0 +1,84 @@
+# =============================================================================
+# Workflow 04 - de novo assembly of long reads with Flye
+# =============================================================================
+#   PacBio or ONT reads
+#     -> length filter   drop reads shorter than min_read_length (SeqKit)
+#     -> Flye            repeat-graph assembly + polishing iterations
+#     -> evaluation      compleasm completeness + BBMap contiguity
+#
+# Run from the repository root:
+#   snakemake -s workflows/04_assembly_flye/Snakefile \
+#             --configfile config/04_assembly_flye.yaml \
+#             --use-conda --cores 50
+# Help: workflows/04_assembly_flye/README.md
+# =============================================================================
+
+import os
+
+configfile: "config/04_assembly_flye.yaml"
+
+SAMPLES = config["samples"]
+OUT = config["outdir"]
+F = config["flye"]
+
+ASSEMBLY = f"{OUT}/{{sample}}/flye/assembly.fasta"
+EVAL = f"{OUT}/{{sample}}/eval/{{sample}}.flye"
+
+wildcard_constraints:
+    sample="[^/]+",
+
+
+rule all:
+    input:
+        expand(ASSEMBLY, sample=SAMPLES),
+        expand(f"{EVAL}.compleasm.tsv", sample=SAMPLES),
+        expand(f"{EVAL}.stats.txt", sample=SAMPLES),
+
+
+rule filter_reads:
+    """Remove reads shorter than min_read_length."""
+    input:
+        reads=config["reads"],
+    output:
+        reads=temp(f"{OUT}/{{sample}}/reads/{{sample}}.min_len.fasta.gz"),
+    params:
+        min_len=config["min_read_length"],
+    log:
+        f"{OUT}/{{sample}}/logs/filter_reads.log",
+    threads: 4
+    conda:
+        "../../envs/assembly_stats.yaml"
+    shell:
+        "seqkit seq -j {threads} -m {params.min_len} {input.reads} "
+        "-o {output.reads} &> {log}"
+
+
+rule flye:
+    """Repeat-graph assembly with Flye, including polishing iterations."""
+    input:
+        reads=rules.filter_reads.output.reads,
+    output:
+        fa=ASSEMBLY,
+        info=f"{OUT}/{{sample}}/flye/assembly_info.txt",
+    params:
+        outdir=lambda w: f"{OUT}/{w.sample}/flye",
+        read_type=F["read_type"],
+        genome_size=F["genome_size"],
+        iterations=F["iterations"],
+        extra=F["extra"],
+    log:
+        f"{OUT}/{{sample}}/logs/flye.log",
+    benchmark:
+        f"{OUT}/{{sample}}/benchmarks/flye.tsv"
+    threads: config["threads"]["flye"]
+    resources:
+        mem_mb=config["mem_mb"]["flye"],
+    conda:
+        "../../envs/flye.yaml"
+    shell:
+        "flye --{params.read_type} {input.reads} --threads {threads} "
+        "--iterations {params.iterations} --genome-size {params.genome_size} "
+        "--out-dir {params.outdir} {params.extra} &> {log}"
+
+
+include: "../common/assembly_eval.smk"

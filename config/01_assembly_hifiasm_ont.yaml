@@ -1,0 +1,30 @@
+# Workflow 01 - de novo assembly of ONT reads with Hifiasm
+# -----------------------------------------------------------------------------
+# One entry per genome. Reads are found through the `reads` pattern below.
+samples:
+  - sampleA
+  - sampleB
+
+# Path pattern to each sample's raw ONT reads ({sample} is filled in).
+reads: "data/ont/{sample}.fastq.gz"
+
+outdir: "results/01_assembly_hifiasm_ont"
+
+hifiasm:
+  genome_size: "840m"     # estimated haploid genome size (--hg-size)
+  n_hap: 4                # ploidy (--n-hap); 4 for an autotetraploid
+  extra: "--ont -s 0.4"   # read type and other Hifiasm options
+
+compleasm:
+  lineage: "embryophyta_odb10"
+  library: "resources/compleasm_downloads"   # downloaded on first run if empty
+
+threads:
+  porechop: 40
+  nanostat: 8
+  hifiasm: 40
+  compleasm: 40
+
+mem_mb:
+  hifiasm: 400000
+  default: 16000

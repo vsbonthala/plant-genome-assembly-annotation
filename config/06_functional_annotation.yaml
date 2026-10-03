@@ -1,0 +1,64 @@
+# Workflow 06 - functional annotation, TE filtering and QC of gene models
+# -----------------------------------------------------------------------------
+samples:
+  - sampleA
+haplotypes: ["H1", "H2", "H3", "H4"]
+
+# Inputs from workflow 05 ({sample} and {hap} are filled in).
+genome_fasta: "results/05_finishing_helixer/{sample}/{hap}/{sample}_{hap}.fa"
+gene_models:  "results/05_finishing_helixer/{sample}/{hap}/{sample}_{hap}.Helixer.gff3"
+
+outdir: "results/06_functional_annotation"
+
+# GFF3 normaliser: agat | gt | none
+normaliser: "agat"
+
+# --- homology search against UniProt/Swiss-Prot ------------------------------
+# aligner: mmseqs | diamond | blastp
+# Build the search database ONCE from the same FASTA given as `uniprot_fasta`,
+# so that hit IDs can be resolved to descriptions, e.g.
+#   mmseqs createdb uniprot_sprot.fasta resources/uniprot_sprot_mmseqs
+#   diamond makedb --in uniprot_sprot.fasta -d resources/uniprot_sprot
+#   makeblastdb -in uniprot_sprot.fasta -dbtype prot -out resources/uniprot_sprot
+homology:
+  aligner: "mmseqs"
+  database: "resources/uniprot_sprot_mmseqs"
+  uniprot_fasta: "resources/uniprot_sprot.fasta"
+  evalue: "1e-6"
+  mmseqs_sensitivity: 7.5     # 5.7 fast | 7.5 near-BLAST
+  max_targets: 20             # hits kept before choosing the best by bitscore
+  threads: 30
+
+# --- InterProScan ------------------------------------------------------------
+# InterProScan is installed separately (https://interproscan-docs.readthedocs.io).
+interproscan:
+  cmd: "interproscan.sh"
+  applications: "Pfam"        # -appl
+  write_analyses: "Pfam"      # analyses written into the GFF3 ("" = all)
+  tmpdir: "/tmp"
+  threads: 30
+
+# --- filters -----------------------------------------------------------------
+min_aa: 50
+# One TE-associated Pfam ID per line; replace the example with your curated list.
+te_pfam_list: "resources/te_pfam_ids.example.txt"
+te_keywords:
+  - "transpos"
+  - "polyprotein"
+  - "gypsy"
+  - "copia"
+  - "HAT domain"
+  - "HAT family"
+  - "HAT dimeri"
+  - "CACTA"
+  - "Mutator"
+  - "RNA-directed DNA polymerase"
+  - "reverse transcriptase"
+
+# --- QC ----------------------------------------------------------------------
+compleasm:
+  lineage: "embryophyta_odb10"
+  library: "resources/compleasm_downloads"
+  threads: 30
+hap_spread_max: 0.15     # flag if 'chrom' gene counts differ by more than this
+stop_frac_max: 0.05      # flag if more than this fraction has internal stops

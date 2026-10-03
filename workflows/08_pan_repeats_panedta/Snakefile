@@ -1,0 +1,69 @@
+# =============================================================================
+# Workflow 08 - consistent pan-genome TE annotation with panEDTA
+# =============================================================================
+#   all genome / haplotype FASTAs + species CDS
+#     -> genome list    absolute paths, one genome per line
+#     -> panEDTA        EDTA per genome, a combined pan-genome TE library,
+#                       then re-annotation of every genome with that library
+#
+# A shared library gives TE annotations that are directly comparable across
+# genomes, which per-genome EDTA runs (workflow 07) do not guarantee.
+#
+# Run from the repository root:
+#   snakemake -s workflows/08_pan_repeats_panedta/Snakefile \
+#             --configfile config/08_pan_repeats_panedta.yaml \
+#             --use-conda --cores 10
+# Help: workflows/08_pan_repeats_panedta/README.md
+# =============================================================================
+
+import os
+
+configfile: "config/08_pan_repeats_panedta.yaml"
+
+GENOMES = config["genomes"]
+OUT = config["outdir"]
+P = config["panedta"]
+
+
+rule all:
+    input:
+        f"{OUT}/panEDTA.done",
+
+
+rule genome_list:
+    """Write the genome list panEDTA expects (absolute paths, one per line)."""
+    input:
+        list(GENOMES.values()),
+    output:
+        txt=f"{OUT}/genome_list.txt",
+    run:
+        with open(output.txt, "w") as out:
+            for path in input:
+                out.write(os.path.abspath(path) + "\n")
+
+
+rule panedta:
+    """Pan-genome TE library and consistent TE annotation of every genome."""
+    input:
+        genome_list=rules.genome_list.output.txt,
+        genomes=list(GENOMES.values()),
+        cds=config["cds"],
+    output:
+        done=touch(f"{OUT}/panEDTA.done"),
+    params:
+        outdir=OUT,
+        cmd=P["cmd"],
+        extra=P["extra"],
+    log:
+        f"{OUT}/panEDTA.log",
+    threads: P["threads"]
+    resources:
+        mem_mb=P["mem_mb"],
+    conda:
+        "../../envs/edta.yaml"
+    shell:
+        """
+        log=$(realpath -m {log}); cds=$(realpath {input.cds})
+        cd {params.outdir}
+        {params.cmd} -g genome_list.txt -c $cds -t {threads} {params.extra} &> $log
+        """

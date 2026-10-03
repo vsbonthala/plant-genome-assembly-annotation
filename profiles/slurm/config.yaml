@@ -1,0 +1,32 @@
+# Snakemake (8+) profile for Slurm clusters.
+# Requires: pip install snakemake-executor-plugin-slurm
+# Use with: --workflow-profile profiles/slurm
+executor: slurm
+jobs: 100
+software-deployment-method: conda
+latency-wait: 60
+retries: 1
+rerun-incomplete: true
+printshellcmds: true
+
+default-resources:
+  slurm_account: "<your_account>"
+  slurm_partition: "<your_partition>"
+  mem_mb: 16000
+  runtime: 1440          # minutes
+
+# Per-rule overrides, e.g. long-running assemblies:
+set-resources:
+  hifiasm:
+    runtime: 10080
+  canu:
+    runtime: 30240
+  flye:
+    runtime: 30240
+  stlfr2supernova:
+    runtime: 17280
+  edta:
+    runtime: 10080
+  orthofinder:
+    runtime: 10080
+

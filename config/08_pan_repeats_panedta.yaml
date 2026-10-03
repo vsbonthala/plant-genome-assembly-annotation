@@ -1,0 +1,21 @@
+# Workflow 08 - consistent pan-genome TE annotation with panEDTA
+# -----------------------------------------------------------------------------
+# All genomes or haplotypes of the pan-genome: name -> FASTA path.
+# Finished haplotypes from workflow 05 can be listed directly.
+genomes:
+  sampleA_H1: "results/05_finishing_helixer/sampleA/H1/sampleA_H1.fa"
+  sampleA_H2: "results/05_finishing_helixer/sampleA/H2/sampleA_H2.fa"
+
+# Coding sequences of the species (used by panEDTA to remove gene sequences
+# from the TE library), e.g. CDS from workflow 06 or a reference annotation.
+cds: "resources/cds.fasta"
+
+outdir: "results/08_pan_repeats_panedta"
+
+panedta:
+  # The panEDTA.sh script shipped with EDTA; give the full path if it is not
+  # on your PATH. Run `panEDTA.sh -h` for all options (e.g. a curated library).
+  cmd: "panEDTA.sh"
+  extra: ""
+  threads: 10
+  mem_mb: 200000

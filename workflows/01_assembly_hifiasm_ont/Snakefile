@@ -1,0 +1,155 @@
+# =============================================================================
+# Workflow 01 - de novo assembly of ONT long reads with Hifiasm
+# =============================================================================
+#   raw ONT reads
+#     -> Porechop            adapter trimming
+#     -> remove split reads  drop reads whose ID occurs more than once
+#     -> NanoStat            read length / quality summary
+#     -> Hifiasm             polyploid-aware assembly (--n-hap)
+#     -> GFA -> FASTA        primary unitig graph to FASTA
+#     -> evaluation          compleasm completeness + BBMap contiguity
+#
+# Run from the repository root:
+#   snakemake -s workflows/01_assembly_hifiasm_ont/Snakefile \
+#             --configfile config/01_assembly_hifiasm_ont.yaml \
+#             --use-conda --cores 40
+# Help: workflows/01_assembly_hifiasm_ont/README.md
+# =============================================================================
+
+import os
+
+configfile: "config/01_assembly_hifiasm_ont.yaml"
+
+SAMPLES = config["samples"]
+OUT = config["outdir"]
+THREADS = config["threads"]
+MEM = config["mem_mb"]
+
+ASSEMBLY = f"{OUT}/{{sample}}/assembly/{{sample}}.bp.p_utg.fa"
+EVAL = f"{OUT}/{{sample}}/eval/{{sample}}.hifiasm"
+
+wildcard_constraints:
+    sample="[^/]+",
+
+
+rule all:
+    input:
+        expand(f"{OUT}/{{sample}}/qc/{{sample}}.nanostat.txt", sample=SAMPLES),
+        expand(ASSEMBLY, sample=SAMPLES),
+        expand(f"{EVAL}.compleasm.tsv", sample=SAMPLES),
+        expand(f"{EVAL}.stats.txt", sample=SAMPLES),
+
+
+# -----------------------------------------------------------------------------
+# Read QC and filtering
+# -----------------------------------------------------------------------------
+rule porechop:
+    """Trim ONT adapters."""
+    input:
+        fastq=config["reads"],
+    output:
+        fastq=temp(f"{OUT}/{{sample}}/qc/{{sample}}.porechop.fastq"),
+    log:
+        f"{OUT}/{{sample}}/logs/porechop.log",
+    benchmark:
+        f"{OUT}/{{sample}}/benchmarks/porechop.tsv"
+    threads: THREADS["porechop"]
+    conda:
+        "../../envs/read_qc.yaml"
+    shell:
+        "porechop -i {input.fastq} -o {output.fastq} -t {threads} &> {log}"
+
+
+rule remove_split_reads:
+    """Keep reads whose ID is unique; set aside reads whose ID is duplicated
+    (split reads produced by Porechop's middle-adapter splitting)."""
+    input:
+        fq=rules.porechop.output.fastq,
+    output:
+        uniq_fq=f"{OUT}/{{sample}}/qc/{{sample}}.porechop.uniq.fastq",
+        uniq_id=f"{OUT}/{{sample}}/qc/{{sample}}.porechop.uniq.id",
+        dup_fq=f"{OUT}/{{sample}}/qc/{{sample}}.porechop.dup.fastq",
+        dup_id=f"{OUT}/{{sample}}/qc/{{sample}}.porechop.dup.id",
+    benchmark:
+        f"{OUT}/{{sample}}/benchmarks/remove_split_reads.tsv"
+    conda:
+        "../../envs/read_qc.yaml"
+    shell:
+        r"""
+        awk 'NR % 4 == 1 {{sub(/^@/, "", $1); print $1}}' {input.fq} | sort | uniq -u > {output.uniq_id}
+        awk 'NR % 4 == 1 {{sub(/^@/, "", $1); print $1}}' {input.fq} | sort | uniq -d > {output.dup_id}
+
+        seqtk subseq {input.fq} {output.uniq_id} > {output.uniq_fq}
+
+        if [ -s {output.dup_id} ]; then
+            seqtk subseq {input.fq} {output.dup_id} > {output.dup_fq}
+        else
+            touch {output.dup_fq}
+        fi
+        """
+
+
+rule nanostat:
+    """Read length and quality summary of the filtered reads."""
+    input:
+        fq=rules.remove_split_reads.output.uniq_fq,
+    output:
+        summary=f"{OUT}/{{sample}}/qc/{{sample}}.nanostat.txt",
+    params:
+        outdir=lambda w, output: os.path.dirname(output.summary),
+        name=lambda w, output: os.path.basename(output.summary),
+    log:
+        f"{OUT}/{{sample}}/logs/nanostat.log",
+    benchmark:
+        f"{OUT}/{{sample}}/benchmarks/nanostat.tsv"
+    threads: THREADS["nanostat"]
+    conda:
+        "../../envs/read_qc.yaml"
+    shell:
+        "NanoStat -t {threads} --fastq {input.fq} --outdir {params.outdir} "
+        "--name {params.name} --tsv &> {log}"
+
+
+# -----------------------------------------------------------------------------
+# Assembly
+# -----------------------------------------------------------------------------
+rule hifiasm:
+    """Polyploid-aware de novo assembly of ONT reads."""
+    input:
+        fastq=rules.remove_split_reads.output.uniq_fq,
+    output:
+        gfa=f"{OUT}/{{sample}}/assembly/{{sample}}.bp.p_utg.gfa",
+    params:
+        prefix=f"{OUT}/{{sample}}/assembly/{{sample}}",
+        genome_size=config["hifiasm"]["genome_size"],
+        n_hap=config["hifiasm"]["n_hap"],
+        extra=config["hifiasm"]["extra"],
+    log:
+        f"{OUT}/{{sample}}/logs/hifiasm.log",
+    benchmark:
+        f"{OUT}/{{sample}}/benchmarks/hifiasm.tsv"
+    threads: THREADS["hifiasm"]
+    resources:
+        mem_mb=MEM["hifiasm"],
+    conda:
+        "../../envs/hifiasm.yaml"
+    shell:
+        "hifiasm {params.extra} -t {threads} -o {params.prefix} "
+        "--n-hap {params.n_hap} --hg-size {params.genome_size} "
+        "{input.fastq} &> {log}"
+
+
+rule gfa_to_fasta:
+    """Write the segment (S) lines of the primary unitig graph as FASTA."""
+    input:
+        gfa=rules.hifiasm.output.gfa,
+    output:
+        fa=ASSEMBLY,
+    shell:
+        r"""awk '/^S/ {{print ">"$2; print $3}}' {input.gfa} > {output.fa}"""
+
+
+# -----------------------------------------------------------------------------
+# Evaluation (shared with workflows 03 and 04)
+# -----------------------------------------------------------------------------
+include: "../common/assembly_eval.smk"

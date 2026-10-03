@@ -1,0 +1,268 @@
+# =============================================================================
+# Workflow 02 - de novo assembly of stLFR linked reads with Supernova
+# =============================================================================
+#   stLFR reads
+#     -> stlfr2supernova_pipeline   convert barcodes + run Supernova
+#     -> supernova mkoutput         pseudohaplotype FASTA
+#     -> minimap2 + samtools        map cleaned short reads to the draft
+#     -> purge_haplotigs            hist -> cov -> purge  (remove allelic contigs)
+#     -> seqkit                     drop contigs < min_contig_len
+#     -> BBMap stats.sh             contiguity, before and after the length filter
+#     -> BUSCO                      gene-space completeness + summary plot
+#
+# Run from the repository root:
+#   snakemake -s workflows/02_assembly_supernova_stlfr/Snakefile \
+#             --configfile config/02_assembly_supernova_stlfr.yaml \
+#             --use-conda --cores 80
+#
+# NOTE: purge_haplotigs needs coverage cut-offs read from the depth histogram.
+# Run once to the `purge_hist` step (`--until purge_hist`), inspect the
+# histogram, set the cut-offs in the config, then run the full workflow.
+# =============================================================================
+
+configfile: "config/02_assembly_supernova_stlfr.yaml"
+
+SAMPLES = config["samples"]
+OUT = config["outdir"]
+THREADS = config["threads"]
+MEM = config["mem_mb"]
+SN = config["supernova"]
+
+wildcard_constraints:
+    sample="[^/]+",
+
+
+def workdir(w):
+    return f"{OUT}/{w.sample}"
+
+
+def purge_cutoffs(w):
+    pc = config["purge_haplotigs"]
+    return pc.get(w.sample, pc["default"])
+
+
+rule all:
+    input:
+        expand(f"{OUT}/{{sample}}/purge/curated.stats.txt", sample=SAMPLES),
+        expand(f"{OUT}/{{sample}}/purge/curated_min_len.stats.txt", sample=SAMPLES),
+        expand(f"{OUT}/{{sample}}/busco/busco_figure.png", sample=SAMPLES),
+
+
+# -----------------------------------------------------------------------------
+# Assembly
+# -----------------------------------------------------------------------------
+rule stlfr2supernova:
+    """Convert stLFR barcodes to 10x format and assemble with Supernova
+    (external pipeline, driven by a per-sample profile file)."""
+    input:
+        profile=config["stlfr2supernova"]["profile"],
+    output:
+        asm_dir=directory(f"{OUT}/{{sample}}/{SN['asm_dir']}"),
+        r1=f"{OUT}/{{sample}}/{SN['clean_r1']}",
+        r2=f"{OUT}/{{sample}}/{SN['clean_r2']}",
+    params:
+        wd=workdir,
+        run_script=config["stlfr2supernova"]["run_script"],
+    log:
+        f"{OUT}/{{sample}}/logs/stlfr2supernova.log",
+    threads: THREADS["supernova"]
+    resources:
+        mem_mb=MEM["supernova"],
+    shell:
+        """
+        log=$(realpath -m {log})
+        cp {input.profile} {params.wd}/profile
+        cd {params.wd}
+        {params.run_script} &> $log
+        """
+
+
+rule supernova_mkoutput:
+    """Write the Supernova graph as a pseudohaplotype FASTA."""
+    input:
+        asm_dir=rules.stlfr2supernova.output.asm_dir,
+    output:
+        fa=f"{OUT}/{{sample}}/{{sample}}_output.fasta",
+    params:
+        prefix=lambda w: f"{OUT}/{w.sample}/{w.sample}_output",
+        minsize=SN["minsize"],
+        style=SN["style"],
+    log:
+        f"{OUT}/{{sample}}/logs/supernova_mkoutput.log",
+    shell:
+        """
+        supernova mkoutput --minsize={params.minsize} --style={params.style} \
+            --asmdir={input.asm_dir} --outprefix={params.prefix} &> {log}
+        gunzip -c {params.prefix}.fasta.gz > {output.fa}
+        """
+
+
+# -----------------------------------------------------------------------------
+# Haplotig purging
+# -----------------------------------------------------------------------------
+rule map_reads:
+    """Map the cleaned stLFR short reads to the draft assembly."""
+    input:
+        asm=rules.supernova_mkoutput.output.fa,
+        r1=rules.stlfr2supernova.output.r1,
+        r2=rules.stlfr2supernova.output.r2,
+    output:
+        bam=f"{OUT}/{{sample}}/purge/aligned.bam",
+    log:
+        f"{OUT}/{{sample}}/logs/map_reads.log",
+    threads: THREADS["mapping"]
+    resources:
+        mem_mb=MEM["mapping"],
+    conda:
+        "../../envs/mapping.yaml"
+    shell:
+        """
+        minimap2 -ax sr -t {threads} {input.asm} {input.r1} {input.r2} 2> {log} \
+            | samtools sort -@ {threads} -m 2G -o {output.bam} - 2>> {log}
+        samtools index {output.bam}
+        """
+
+
+rule purge_hist:
+    """Step 1: read-depth histogram, used to choose the coverage cut-offs."""
+    input:
+        bam=rules.map_reads.output.bam,
+        asm=rules.supernova_mkoutput.output.fa,
+    output:
+        gencov=f"{OUT}/{{sample}}/purge/aligned.bam.gencov",
+        hist=f"{OUT}/{{sample}}/purge/aligned.bam.histogram.png",
+    params:
+        pdir=lambda w: f"{OUT}/{w.sample}/purge",
+    log:
+        f"{OUT}/{{sample}}/logs/purge_hist.log",
+    threads: THREADS["purge"]
+    conda:
+        "../../envs/purge_haplotigs.yaml"
+    shell:
+        """
+        log=$(realpath -m {log}); asm=$(realpath {input.asm})
+        cd {params.pdir}
+        purge_haplotigs hist -b aligned.bam -g $asm -t {threads} &> $log
+        """
+
+
+rule purge_cov:
+    """Step 2: flag suspect contigs using the low/mid/high depth cut-offs."""
+    input:
+        gencov=rules.purge_hist.output.gencov,
+    output:
+        csv=f"{OUT}/{{sample}}/purge/coverage_stats.csv",
+    params:
+        pdir=lambda w: f"{OUT}/{w.sample}/purge",
+        cut=purge_cutoffs,
+    log:
+        f"{OUT}/{{sample}}/logs/purge_cov.log",
+    conda:
+        "../../envs/purge_haplotigs.yaml"
+    shell:
+        """
+        log=$(realpath -m {log})
+        cd {params.pdir}
+        purge_haplotigs cov -i aligned.bam.gencov \
+            -l {params.cut[low]} -m {params.cut[mid]} -h {params.cut[high]} \
+            -o coverage_stats.csv &> $log
+        """
+
+
+rule purge_purge:
+    """Step 3: remove haplotigs and artefactual contigs."""
+    input:
+        csv=rules.purge_cov.output.csv,
+        bam=rules.map_reads.output.bam,
+        asm=rules.supernova_mkoutput.output.fa,
+    output:
+        fa=f"{OUT}/{{sample}}/purge/curated.fasta",
+    params:
+        pdir=lambda w: f"{OUT}/{w.sample}/purge",
+    log:
+        f"{OUT}/{{sample}}/logs/purge_purge.log",
+    threads: THREADS["purge"]
+    conda:
+        "../../envs/purge_haplotigs.yaml"
+    shell:
+        """
+        log=$(realpath -m {log}); asm=$(realpath {input.asm})
+        cd {params.pdir}
+        purge_haplotigs purge -g $asm -c coverage_stats.csv -t {threads} \
+            -d -b aligned.bam -o curated &> $log
+        """
+
+
+rule min_length_filter:
+    """Drop contigs shorter than min_contig_len."""
+    input:
+        fa=rules.purge_purge.output.fa,
+    output:
+        fa=f"{OUT}/{{sample}}/purge/curated_min_len.fasta",
+    params:
+        min_len=config["min_contig_len"],
+    conda:
+        "../../envs/assembly_stats.yaml"
+    shell:
+        "seqkit seq -m {params.min_len} {input.fa} > {output.fa}"
+
+
+# -----------------------------------------------------------------------------
+# Evaluation
+# -----------------------------------------------------------------------------
+rule purge_stats:
+    """Contiguity statistics before and after the length filter."""
+    input:
+        fa=f"{OUT}/{{sample}}/purge/{{asm}}.fasta",
+    output:
+        stats=f"{OUT}/{{sample}}/purge/{{asm}}.stats.txt",
+    wildcard_constraints:
+        asm="curated|curated_min_len",
+    conda:
+        "../../envs/assembly_stats.yaml"
+    shell:
+        "stats.sh in={input.fa} out={output.stats} addname=t extended=t -Xmx10g"
+
+
+rule busco:
+    """BUSCO completeness of the purged assembly, before and after filtering."""
+    input:
+        fa=f"{OUT}/{{sample}}/purge/{{asm}}.fasta",
+    output:
+        summary=f"{OUT}/{{sample}}/busco/summaries/short_summary.{{asm}}.txt",
+    params:
+        bdir=lambda w: f"{OUT}/{w.sample}/busco",
+        lineage=config["busco"]["lineage"],
+    wildcard_constraints:
+        asm="curated|curated_min_len",
+    log:
+        f"{OUT}/{{sample}}/logs/busco_{{asm}}.log",
+    threads: THREADS["busco"]
+    conda:
+        "../../envs/busco.yaml"
+    shell:
+        """
+        busco -i {input.fa} -o {wildcards.asm} --out_path {params.bdir} \
+            -l {params.lineage} -m genome -c {threads} -f &> {log}
+        cp {params.bdir}/{wildcards.asm}/short_summary*.txt {output.summary}
+        """
+
+
+rule busco_plot:
+    """Bar chart comparing the BUSCO results."""
+    input:
+        expand(f"{OUT}/{{{{sample}}}}/busco/summaries/short_summary.{{asm}}.txt",
+               asm=["curated", "curated_min_len"]),
+    output:
+        png=f"{OUT}/{{sample}}/busco/busco_figure.png",
+    params:
+        sdir=lambda w: f"{OUT}/{w.sample}/busco/summaries",
+    log:
+        f"{OUT}/{{sample}}/logs/busco_plot.log",
+    conda:
+        "../../envs/busco.yaml"
+    shell:
+        """
+        generate_plot.py -wd {params.sdir} &> {log}
+        cp {params.sdir}/busco_figure.png {output.png}
+        """

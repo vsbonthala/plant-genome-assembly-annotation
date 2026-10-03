@@ -1,0 +1,36 @@
+# Workflow 03 - de novo assembly of long reads with Canu
+# -----------------------------------------------------------------------------
+samples:
+  - sampleA
+
+# Path pattern to each sample's reads (FASTA or FASTQ, optionally gzipped).
+reads: "data/pacbio/{sample}.fasta"
+
+# Reads shorter than this are removed before assembly (0 = keep all).
+min_read_length: 1000
+
+outdir: "results/03_assembly_canu"
+
+canu:
+  genome_size: "850m"
+  read_type: "-pacbio"      # -pacbio | -nanopore | -pacbio-hifi
+  max_memory: 200           # GB  (maxMemory)
+  meryl_memory: 50          # GB  (merylMemory)
+  meryl_threads: 4          #     (merylThreads)
+  # Canu can submit its own jobs to the cluster (useGrid=true). By default the
+  # whole run is one Snakemake job (useGrid=false); to let Canu use the grid,
+  # set use_grid: true and pass scheduler options in `extra`, e.g.
+  #   extra: 'gridOptions="--account=<acct> --partition=<part> --time=21-00:00:00"'
+  use_grid: false
+  extra: ""
+
+compleasm:
+  lineage: "embryophyta_odb10"
+  library: "resources/compleasm_downloads"
+
+threads:
+  canu: 20
+  compleasm: 20
+
+mem_mb:
+  canu: 220000

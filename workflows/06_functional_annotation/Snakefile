@@ -1,0 +1,384 @@
+# =============================================================================
+# Workflow 06 - functional annotation, TE filtering and QC of gene models
+# =============================================================================
+#   Helixer GFF3 (per sample and haplotype, from workflow 05)
+#     0  inventory          feature types, phases, strands, tracks
+#     1  normalise + sort   AGAT or GenomeTools; Chr01..ChrNN -> UA -> utg
+#     2  extract            proteins / CDS / transcripts (gffread)
+#     3  homology search    MMseqs2 | DIAMOND | BLASTP vs UniProt, best hit
+#     4  descriptions       Note= in GFF3, descriptions in FASTA headers
+#     5  InterProScan       domains, GO terms
+#     6  merge InterPro     Dbxref + Ontology_term into the GFF3
+#     7  length filter      drop genes with no protein >= min_aa
+#     8  Pfam TE filter     drop genes with TE-associated Pfam domains
+#     9  keyword TE filter  drop genes whose annotation names TE functions
+#    10  final sequences    non-TE proteins and transcripts
+#    11  split tracks       all / chrom / utg
+#    12  QC                 per-stage counts, model metrics, compleasm
+#    13  collect            sample-level tables and [ok]/[FLAG] checks
+#
+# Annotation runs once on the full gene set; the track split comes last, so
+# the expensive searches are never repeated per track.
+#
+# Run from the repository root:
+#   snakemake -s workflows/06_functional_annotation/Snakefile \
+#             --configfile config/06_functional_annotation.yaml \
+#             --use-conda --cores 40
+# =============================================================================
+
+import os
+
+configfile: "config/06_functional_annotation.yaml"
+
+SAMPLES = config["samples"]
+HAPS = config["haplotypes"]
+TRACKS = ["all", "chrom", "utg"]
+OUT = config["outdir"]
+MIN_AA = int(config["min_aa"])
+HOM = config["homology"]
+IPR = config["interproscan"]
+
+ANN = f"{OUT}/{{sample}}/{{hap}}"
+BASE = f"{ANN}/{{sample}}_{{hap}}"        # per-haplotype file prefix
+
+wildcard_constraints:
+    sample="[^/]+",
+    hap="|".join(HAPS),
+    track="|".join(TRACKS),
+
+
+rule all:
+    input:
+        expand(f"{BASE}.feature_inventory.txt", sample=SAMPLES, hap=HAPS),
+        expand(f"{BASE}.{{track}}.nonTE.gff3", sample=SAMPLES, hap=HAPS, track=TRACKS),
+        expand(f"{BASE}.{{track}}.nonTE.proteins.fa", sample=SAMPLES, hap=HAPS, track=TRACKS),
+        expand(f"{BASE}.{{track}}.nonTE.transcripts.fa", sample=SAMPLES, hap=HAPS, track=TRACKS),
+        expand(f"{OUT}/{{sample}}/{{sample}}_annotation_qc.tsv", sample=SAMPLES),
+        expand(f"{OUT}/{{sample}}/{{sample}}_annotation_qc_flags.txt", sample=SAMPLES),
+
+
+# -----------------------------------------------------------------------------
+# 0-2  inventory, normalisation, sequence extraction
+# -----------------------------------------------------------------------------
+rule feature_inventory:
+    input:
+        gff=config["gene_models"],
+    output:
+        inv=f"{BASE}.feature_inventory.txt",
+    script:
+        "../../scripts/gff_feature_inventory.py"
+
+
+rule normalise_gff:
+    """Tidy the gene hierarchy (AGAT or GenomeTools); fall back to a copy."""
+    input:
+        gff=config["gene_models"],
+    output:
+        gff=temp(f"{BASE}.norm.gff3"),
+    params:
+        tool=config["normaliser"],
+    log:
+        f"{BASE}.normalise.log",
+    conda:
+        "../../envs/gff_tools.yaml"
+    shell:
+        """
+        case "{params.tool}" in
+          agat)
+            agat_convert_sp_gxf2gxf.pl -g {input.gff} -o {output.gff} &> {log} \
+                || cp {input.gff} {output.gff} ;;
+          gt)
+            gt gff3 -sort -tidy -retainids {input.gff} > {output.gff} 2> {log} \
+                || cp {input.gff} {output.gff} ;;
+          *)
+            echo "normaliser=none: GFF3 passed through unchanged" > {log}
+            cp {input.gff} {output.gff} ;;
+        esac
+        """
+
+
+rule sort_gff:
+    input:
+        gff=rules.normalise_gff.output.gff,
+    output:
+        gff=f"{BASE}.all.gff3",
+    script:
+        "../../scripts/sort_gff.py"
+
+
+rule extract_sequences:
+    """Proteins, CDS and transcripts from the gene models (gffread)."""
+    input:
+        gff=rules.sort_gff.output.gff,
+        fa=config["genome_fasta"],
+    output:
+        pep=f"{BASE}.proteins.fa",
+        cds=f"{BASE}.cds.fa",
+        trn=f"{BASE}.transcripts.fa",
+    log:
+        f"{BASE}.gffread.log",
+    conda:
+        "../../envs/gff_tools.yaml"
+    shell:
+        "gffread -y {output.pep} -x {output.cds} -w {output.trn} "
+        "-g {input.fa} {input.gff} &> {log}"
+
+
+# -----------------------------------------------------------------------------
+# 3-6  homology, descriptions, InterProScan
+# -----------------------------------------------------------------------------
+def homology_cmd(wildcards, input, output, threads):
+    """Command for the configured aligner; all write BLAST tabular output."""
+    db, ev, n = HOM["database"], HOM["evalue"], HOM["max_targets"]
+    if HOM["aligner"] == "mmseqs":
+        tmp = output.raw + ".tmp"
+        return (f"mmseqs easy-search {input.pep} {db} {output.raw} {tmp} "
+                f"--format-mode 0 -e {ev} -s {HOM['mmseqs_sensitivity']} "
+                f"--max-seqs {n} --threads {threads} && rm -rf {tmp}")
+    if HOM["aligner"] == "diamond":
+        return (f"diamond blastp -d {db} -q {input.pep} -o {output.raw} "
+                f"--outfmt 6 --evalue {ev} --very-sensitive "
+                f"--max-target-seqs {n} --threads {threads}")
+    if HOM["aligner"] == "blastp":
+        return (f"blastp -db {db} -query {input.pep} -out {output.raw} "
+                f"-num_threads {threads} -outfmt 6 -evalue {ev} -seg yes "
+                f"-soft_masking true -lcase_masking -max_hsps 1 "
+                f"-max_target_seqs {n}")
+    raise ValueError("homology.aligner must be mmseqs, diamond or blastp")
+
+
+rule homology_search:
+    """Protein search against UniProt/Swiss-Prot."""
+    input:
+        pep=rules.extract_sequences.output.pep,
+    output:
+        raw=temp(f"{BASE}.homology_raw.m8"),
+    params:
+        cmd=homology_cmd,
+    log:
+        f"{BASE}.homology_search.log",
+    threads: HOM["threads"]
+    conda:
+        "../../envs/homology.yaml"
+    shell:
+        "{params.cmd} &> {log}"
+
+
+rule best_hit:
+    """Keep the highest-bitscore hit per protein."""
+    input:
+        raw=rules.homology_search.output.raw,
+    output:
+        best=f"{BASE}.proteins.besthit.m8",
+    params:
+        aligner=HOM["aligner"],
+    log:
+        f"{BASE}.best_hit.log",
+    script:
+        "../../scripts/best_hit.py"
+
+
+rule add_functional_descriptions:
+    input:
+        best=rules.best_hit.output.best,
+        gff=rules.sort_gff.output.gff,
+        pep=rules.extract_sequences.output.pep,
+        trn=rules.extract_sequences.output.trn,
+    output:
+        gff=f"{BASE}.functions.gff3",
+        pep=f"{BASE}.proteins.functions.fa",
+        trn=f"{BASE}.transcripts.functions.fa",
+    params:
+        uniprot_fa=HOM["uniprot_fasta"],
+    log:
+        f"{BASE}.functional.log",
+    script:
+        "../../scripts/add_functional_descriptions.py"
+
+
+rule interproscan:
+    """Protein domains and GO terms."""
+    input:
+        pep=rules.extract_sequences.output.pep,
+    output:
+        tsv=f"{BASE}.proteins.ipscan.tsv",
+    params:
+        cmd=IPR["cmd"],
+        appl=IPR["applications"],
+        tmpdir=IPR["tmpdir"],
+    log:
+        f"{BASE}.interproscan.log",
+    threads: IPR["threads"]
+    shell:
+        """
+        {params.cmd} -i {input.pep} -o {output.tsv} -cpu {threads} \
+            -dp -t p --goterms --pathways -iprlookup -f tsv \
+            -T {params.tmpdir} -appl {params.appl} &> {log}
+        """
+
+
+rule merge_interproscan:
+    input:
+        gff=rules.add_functional_descriptions.output.gff,
+        tsv=rules.interproscan.output.tsv,
+    output:
+        gff=f"{BASE}.functions.ipscan.gff3",
+    params:
+        ipr_analyses=IPR["write_analyses"],
+    log:
+        f"{BASE}.merge_interproscan.log",
+    script:
+        "../../scripts/merge_interproscan_gff.py"
+
+
+# -----------------------------------------------------------------------------
+# 7-11  filters, final sequences, track split
+# -----------------------------------------------------------------------------
+rule filter_short_models:
+    input:
+        gff=rules.merge_interproscan.output.gff,
+        pep=rules.add_functional_descriptions.output.pep,
+    output:
+        gff=f"{BASE}.AA{MIN_AA}.gff3",
+        ids=f"{BASE}.proteins_AA{MIN_AA}.id",
+    params:
+        min_aa=MIN_AA,
+    log:
+        f"{BASE}.filter_short.log",
+    script:
+        "../../scripts/filter_short_models.py"
+
+
+rule filter_te_pfam:
+    input:
+        gff=rules.filter_short_models.output.gff,
+    output:
+        gff=f"{BASE}.nonTE_pfam.gff3",
+        ids=f"{BASE}.teGenes_pfam.id",
+    params:
+        pfam_list=config["te_pfam_list"],
+    log:
+        f"{BASE}.filter_te_pfam.log",
+    script:
+        "../../scripts/filter_te_pfam.py"
+
+
+rule filter_te_keywords:
+    input:
+        gff=rules.filter_te_pfam.output.gff,
+    output:
+        gff=f"{BASE}.nonTE.gff3",
+        ids=f"{BASE}.teGenes_keywords.id",
+    params:
+        keywords=config["te_keywords"],
+    log:
+        f"{BASE}.filter_te_keywords.log",
+    script:
+        "../../scripts/filter_te_keywords.py"
+
+
+rule final_nonte_sequences:
+    input:
+        gff=rules.filter_te_keywords.output.gff,
+        pep=rules.add_functional_descriptions.output.pep,
+        trn=rules.add_functional_descriptions.output.trn,
+    output:
+        pep=f"{BASE}.nonTE.proteins.fa",
+        trn=f"{BASE}.nonTE.transcripts.fa",
+        ids=f"{BASE}.mrna_AA{MIN_AA}_nonTE.id",
+    script:
+        "../../scripts/final_nonte_sequences.py"
+
+
+rule split_tracks:
+    input:
+        gff=rules.filter_te_keywords.output.gff,
+        pep=rules.final_nonte_sequences.output.pep,
+        trn=rules.final_nonte_sequences.output.trn,
+    output:
+        gff=f"{BASE}.{{track}}.nonTE.gff3",
+        pep=f"{BASE}.{{track}}.nonTE.proteins.fa",
+        trn=f"{BASE}.{{track}}.nonTE.transcripts.fa",
+    log:
+        f"{BASE}.{{track}}.split.log",
+    script:
+        "../../scripts/split_tracks.py"
+
+
+# -----------------------------------------------------------------------------
+# 12-13  QC and collection
+# -----------------------------------------------------------------------------
+rule filtering_summary:
+    input:
+        raw=rules.sort_gff.output.gff,
+        aa=rules.filter_short_models.output.gff,
+        pfam=rules.filter_te_pfam.output.gff,
+        final=rules.filter_te_keywords.output.gff,
+    output:
+        tsv=f"{BASE}.filtering_summary.tsv",
+    params:
+        min_aa=MIN_AA,
+    script:
+        "../../scripts/filtering_summary.py"
+
+
+rule model_qc:
+    input:
+        gff=rules.split_tracks.output.gff,
+        pep=rules.split_tracks.output.pep,
+        ipscan=rules.interproscan.output.tsv,
+    output:
+        qc=f"{BASE}.{{track}}.model_qc.tsv",
+    script:
+        "../../scripts/model_qc.py"
+
+
+rule compleasm_proteins:
+    """BUSCO-style completeness of each final protein set."""
+    input:
+        pep=rules.split_tracks.output.pep,
+    output:
+        summary=f"{BASE}.{{track}}.compleasm/summary.txt",
+    params:
+        outdir=lambda w, output: os.path.dirname(output.summary),
+        lineage=config["compleasm"]["lineage"],
+        library=config["compleasm"]["library"],
+    log:
+        f"{BASE}.{{track}}.compleasm.log",
+    threads: config["compleasm"]["threads"]
+    conda:
+        "../../envs/compleasm.yaml"
+    shell:
+        "compleasm protein -p {input.pep} -o {params.outdir} -t {threads} "
+        "-l {params.lineage} -L {params.library} &> {log}"
+
+
+rule parse_compleasm_proteins:
+    input:
+        summary=rules.compleasm_proteins.output.summary,
+    output:
+        tsv=f"{BASE}.{{track}}.compleasm.tsv",
+    params:
+        kind="Proteins",
+    script:
+        "../../scripts/parse_compleasm.py"
+
+
+rule collect_annotation_qc:
+    input:
+        qcs=expand(f"{BASE}.{{track}}.model_qc.tsv", hap=HAPS, track=TRACKS, allow_missing=True),
+        filt=expand(f"{BASE}.filtering_summary.tsv", hap=HAPS, allow_missing=True),
+        cmp=expand(f"{BASE}.{{track}}.compleasm.tsv", hap=HAPS, track=TRACKS, allow_missing=True),
+    output:
+        tsv=f"{OUT}/{{sample}}/{{sample}}_annotation_qc.tsv",
+        filt=f"{OUT}/{{sample}}/{{sample}}_filtering_summary.tsv",
+        cmp=f"{OUT}/{{sample}}/{{sample}}_compleasm.tsv",
+        flags=f"{OUT}/{{sample}}/{{sample}}_annotation_qc_flags.txt",
+    params:
+        ann_dir=lambda w: f"{OUT}/{w.sample}",
+        haps=HAPS,
+        tracks=TRACKS,
+        hap_spread_max=config["hap_spread_max"],
+        stop_frac_max=config["stop_frac_max"],
+    script:
+        "../../scripts/collect_annotation_qc.py"

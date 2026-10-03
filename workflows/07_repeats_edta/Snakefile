@@ -1,0 +1,64 @@
+# =============================================================================
+# Workflow 07 - repeat and transposable-element annotation with EDTA
+# =============================================================================
+#   genome or haplotype FASTA
+#     -> EDTA   de novo TE library (LTR, TIR, Helitron, non-LTR),
+#               optional curated library, whole-genome TE annotation
+#
+# Each genome runs as an independent job, so on a cluster many genomes run
+# in parallel (this replaces a Slurm job array).
+#
+# Run from the repository root:
+#   snakemake -s workflows/07_repeats_edta/Snakefile \
+#             --configfile config/07_repeats_edta.yaml \
+#             --use-conda --cores 48
+# =============================================================================
+
+import os
+
+configfile: "config/07_repeats_edta.yaml"
+
+GENOMES = config["genomes"]
+OUT = config["outdir"]
+E = config["edta"]
+
+wildcard_constraints:
+    genome="|".join(GENOMES),
+
+
+rule all:
+    input:
+        expand(f"{OUT}/{{genome}}/{{genome}}.fa.mod.EDTA.TEanno.gff3", genome=GENOMES),
+        expand(f"{OUT}/{{genome}}/{{genome}}.fa.mod.EDTA.TElib.fa", genome=GENOMES),
+
+
+rule edta:
+    """De novo TE library and whole-genome TE annotation."""
+    input:
+        fa=lambda w: GENOMES[w.genome],
+    output:
+        anno=f"{OUT}/{{genome}}/{{genome}}.fa.mod.EDTA.TEanno.gff3",
+        lib=f"{OUT}/{{genome}}/{{genome}}.fa.mod.EDTA.TElib.fa",
+    params:
+        wd=lambda w: f"{OUT}/{w.genome}",
+        curated=(f"--curatedlib {os.path.abspath(E['curated_lib'])}"
+                 if E["curated_lib"] else ""),
+        species=E["species"],
+        sensitive=E["sensitive"],
+        anno=E["anno"],
+    log:
+        f"{OUT}/{{genome}}/edta.log",
+    threads: E["threads"]
+    resources:
+        mem_mb=E["mem_mb"],
+    conda:
+        "../../envs/edta.yaml"
+    shell:
+        """
+        log=$(realpath -m {log})
+        ln -sf $(realpath {input.fa}) {params.wd}/{wildcards.genome}.fa
+        cd {params.wd}
+        EDTA.pl --genome {wildcards.genome}.fa --species {params.species} \
+            {params.curated} --sensitive {params.sensitive} --anno {params.anno} \
+            --threads {threads} --force 1 &> $log
+        """

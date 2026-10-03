@@ -1,0 +1,89 @@
+# =============================================================================
+# Workflow 03 - de novo assembly of long reads with Canu
+# =============================================================================
+#   PacBio CLR / HiFi or ONT reads
+#     -> length filter   drop reads shorter than min_read_length (SeqKit)
+#     -> Canu            correction, trimming and assembly -> contigs
+#     -> evaluation      compleasm completeness + BBMap contiguity
+#
+# Run from the repository root:
+#   snakemake -s workflows/03_assembly_canu/Snakefile \
+#             --configfile config/03_assembly_canu.yaml \
+#             --use-conda --cores 20
+# Help: workflows/03_assembly_canu/README.md
+# =============================================================================
+
+import os
+
+configfile: "config/03_assembly_canu.yaml"
+
+SAMPLES = config["samples"]
+OUT = config["outdir"]
+C = config["canu"]
+
+ASSEMBLY = f"{OUT}/{{sample}}/canu/{{sample}}.contigs.fasta"
+EVAL = f"{OUT}/{{sample}}/eval/{{sample}}.canu"
+
+wildcard_constraints:
+    sample="[^/]+",
+
+
+rule all:
+    input:
+        expand(ASSEMBLY, sample=SAMPLES),
+        expand(f"{EVAL}.compleasm.tsv", sample=SAMPLES),
+        expand(f"{EVAL}.stats.txt", sample=SAMPLES),
+
+
+rule filter_reads:
+    """Remove reads shorter than min_read_length."""
+    input:
+        reads=config["reads"],
+    output:
+        reads=temp(f"{OUT}/{{sample}}/reads/{{sample}}.min_len.fasta.gz"),
+    params:
+        min_len=config["min_read_length"],
+    log:
+        f"{OUT}/{{sample}}/logs/filter_reads.log",
+    threads: 4
+    conda:
+        "../../envs/assembly_stats.yaml"
+    shell:
+        "seqkit seq -j {threads} -m {params.min_len} {input.reads} "
+        "-o {output.reads} &> {log}"
+
+
+rule canu:
+    """Read correction, trimming and assembly with Canu."""
+    input:
+        reads=rules.filter_reads.output.reads,
+    output:
+        contigs=ASSEMBLY,
+    params:
+        outdir=lambda w: f"{OUT}/{w.sample}/canu",
+        genome_size=C["genome_size"],
+        read_type=C["read_type"],
+        max_memory=C["max_memory"],
+        meryl_memory=C["meryl_memory"],
+        meryl_threads=C["meryl_threads"],
+        use_grid="true" if C["use_grid"] else "false",
+        extra=C["extra"],
+    log:
+        f"{OUT}/{{sample}}/logs/canu.log",
+    benchmark:
+        f"{OUT}/{{sample}}/benchmarks/canu.tsv"
+    threads: config["threads"]["canu"]
+    resources:
+        mem_mb=config["mem_mb"]["canu"],
+    conda:
+        "../../envs/canu.yaml"
+    shell:
+        "canu -p {wildcards.sample} -d {params.outdir} "
+        "genomeSize={params.genome_size} "
+        "maxMemory={params.max_memory} maxThreads={threads} "
+        "merylMemory={params.meryl_memory} merylThreads={params.meryl_threads} "
+        "useGrid={params.use_grid} {params.extra} "
+        "{params.read_type} {input.reads} &> {log}"
+
+
+include: "../common/assembly_eval.smk"

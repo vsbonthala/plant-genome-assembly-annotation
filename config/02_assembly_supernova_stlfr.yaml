@@ -1,0 +1,47 @@
+# Workflow 02 - de novo assembly of stLFR linked reads with Supernova,
+#               followed by haplotig purging and evaluation
+# -----------------------------------------------------------------------------
+samples:
+  - sampleA
+
+outdir: "results/02_assembly_supernova_stlfr"
+
+# stLFR -> Supernova conversion and assembly, run with the external
+# stlfr2supernova_pipeline (https://github.com/BGI-Qingdao/stlfr2supernova_pipeline).
+# Its profile file describes the read files and primers of each library.
+# One profile per sample; {sample} is filled in.
+stlfr2supernova:
+  run_script: "/path/to/stlfr2supernova_pipeline/run.sh"
+  profile: "config/stlfr_profiles/{sample}.profile"
+
+# Paths the stlfr2supernova pipeline writes, relative to the sample's
+# working directory (outdir/{sample}). Adjust if your version differs.
+supernova:
+  asm_dir: "{sample}/outs/assembly"
+  clean_r1: "split_reads.1.fq.gz.clean.gz"
+  clean_r2: "split_reads.2.fq.gz.clean.gz"
+  minsize: 1000          # supernova mkoutput --minsize
+  style: "pseudohap"     # one pseudo-haplotype, used as input for purging
+
+# purge_haplotigs coverage cut-offs: low, mid, high.
+# Choose them from the read-depth histogram written by `purge_haplotigs hist`
+# (results/.../purge/aligned.bam.histogram.png). Set per sample if needed.
+purge_haplotigs:
+  default: {low: 5, mid: 40, high: 135}
+  # sampleA: {low: 5, mid: 40, high: 135}
+
+min_contig_len: 1000      # contigs shorter than this are dropped before BUSCO
+
+busco:
+  lineage: "embryophyta_odb10"
+
+threads:
+  supernova: 80
+  mapping: 20
+  purge: 20
+  busco: 20
+
+mem_mb:
+  supernova: 800000
+  mapping: 100000
+  default: 16000

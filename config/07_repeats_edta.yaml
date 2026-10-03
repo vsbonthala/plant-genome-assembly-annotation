@@ -1,0 +1,19 @@
+# Workflow 07 - repeat and transposable-element annotation with EDTA
+# -----------------------------------------------------------------------------
+# One entry per genome (or haplotype): name -> FASTA path.
+# Finished haplotypes from workflow 05 can be listed directly, e.g.
+#   sampleA_H1: results/05_finishing_helixer/sampleA/H1/sampleA_H1.fa
+genomes:
+  sampleA_H1: "results/05_finishing_helixer/sampleA/H1/sampleA_H1.fa"
+  sampleA_H2: "results/05_finishing_helixer/sampleA/H2/sampleA_H2.fa"
+
+outdir: "results/07_repeats_edta"
+
+edta:
+  species: "others"
+  # Optional curated TE library (e.g. a plant subset of RepBase); "" = none.
+  curated_lib: ""
+  sensitive: 1
+  anno: 1
+  threads: 12
+  mem_mb: 120000

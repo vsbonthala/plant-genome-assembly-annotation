@@ -1,0 +1,13 @@
+# Example list of transposable-element-associated Pfam domains.
+# One Pfam ID per line; text after the ID is ignored.
+# Replace or extend this with your own curated list.
+PF00078  RVT_1          reverse transcriptase
+PF07727  RVT_2          reverse transcriptase (RNA-dependent DNA polymerase)
+PF00665  rve            integrase core domain
+PF03732  Retrotrans_gag retrotransposon gag protein
+PF04827  Plant_tran     plant transposon protein
+PF03004  Transposase_24 plant transposase (Ptta/En/Spm family)
+PF10551  MULE           MULE transposase domain
+PF02992  Transposase_21 transposase family tnp2
+PF05699  Dimer_Tnp_hAT  hAT family C-terminal dimerisation region
+PF13963  Transpos_assoc transposase-associated domain

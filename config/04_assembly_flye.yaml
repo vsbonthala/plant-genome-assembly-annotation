@@ -1,0 +1,30 @@
+# Workflow 04 - de novo assembly of long reads with Flye
+# -----------------------------------------------------------------------------
+samples:
+  - sampleA
+
+# Path pattern to each sample's reads (FASTA or FASTQ, optionally gzipped).
+reads: "data/pacbio/{sample}.fasta"
+
+# Reads shorter than this are removed before assembly (0 = keep all).
+min_read_length: 1000
+
+outdir: "results/04_assembly_flye"
+
+flye:
+  genome_size: "850m"
+  # pacbio-raw | pacbio-corr | pacbio-hifi | nano-raw | nano-corr | nano-hq
+  read_type: "pacbio-raw"
+  iterations: 2             # polishing iterations
+  extra: ""
+
+compleasm:
+  lineage: "embryophyta_odb10"
+  library: "resources/compleasm_downloads"
+
+threads:
+  flye: 50
+  compleasm: 20
+
+mem_mb:
+  flye: 500000

@@ -1,0 +1,135 @@
+# =============================================================================
+# Workflow 05 - per-haplotype finishing and ab initio gene prediction
+# =============================================================================
+#   reference-guided scaffolds (per sample and haplotype)
+#     -> rename + sort     IDs normalised to Chr01..ChrNN / Chr0N_UA / utg*,
+#                          ordered, with an old->new ID map (audit trail)
+#     -> samtools faidx + BBMap stats.sh
+#     -> PanSN chromosome set   placed chromosomes only, named
+#                               sample#hap#ChrNN, bgzip + indexed for pggb
+#     -> Helixer (land_plant)   ab initio gene models -> GFF3
+#
+# All haplotypes carry identical chromosome names, which is what direct
+# haplotype-vs-haplotype and haplotype-vs-reference comparisons need.
+#
+# Run from the repository root:
+#   snakemake -s workflows/05_finishing_helixer/Snakefile \
+#             --configfile config/05_finishing_helixer.yaml \
+#             --use-conda --cores 40
+# =============================================================================
+
+configfile: "config/05_finishing_helixer.yaml"
+
+SAMPLES = config["samples"]
+HAPS = config["haplotypes"]
+OUT = config["outdir"]
+BASE = f"{OUT}/{{sample}}/{{hap}}/{{sample}}_{{hap}}"   # per-haplotype file prefix
+
+wildcard_constraints:
+    sample="[^/]+",
+    hap="|".join(HAPS),
+
+
+rule all:
+    input:
+        expand(f"{BASE}.fa.fai", sample=SAMPLES, hap=HAPS),
+        expand(f"{BASE}.stats.txt", sample=SAMPLES, hap=HAPS),
+        expand(f"{BASE}.chroms.pansn.fa.gz.fai", sample=SAMPLES, hap=HAPS),
+        expand(f"{BASE}.chroms.pansn.stats.txt", sample=SAMPLES, hap=HAPS),
+        expand(f"{BASE}.Helixer.gff3", sample=SAMPLES, hap=HAPS),
+
+
+rule rename_sort_fasta:
+    """Normalise sequence IDs, sort, and write an old->new ID map."""
+    input:
+        fa=config["scaffolds"],
+    output:
+        sorted_fa=f"{BASE}.fa",
+        id_map=f"{BASE}.id_map.tsv",
+    params:
+        n_chrom=config["n_chrom"],
+    log:
+        f"{BASE}.rename_sort.log",
+    script:
+        "../../scripts/rename_sort_fasta.py"
+
+
+rule index_and_stats:
+    """samtools index and contiguity statistics of the finished haplotype."""
+    input:
+        fa=rules.rename_sort_fasta.output.sorted_fa,
+    output:
+        fai=f"{BASE}.fa.fai",
+        stats=f"{BASE}.stats.txt",
+    log:
+        f"{BASE}.index_and_stats.log",
+    conda:
+        "../../envs/assembly_stats.yaml"
+    shell:
+        """
+        samtools faidx {input.fa} &> {log}
+        stats.sh in={input.fa} out={output.stats} addname=t extended=t \
+            format=3 -Xmx10g &>> {log}
+        """
+
+
+rule make_pansn_chromosomes:
+    """Chromosome-only FASTA with PanSN-spec names (sample#hap#ChrNN)."""
+    input:
+        sorted_fa=rules.rename_sort_fasta.output.sorted_fa,
+    output:
+        pansn=f"{BASE}.chroms.pansn.fa",
+    params:
+        hap_id=lambda w: config["pansn_hap_ids"][w.hap],
+        delim=config["pansn_delim"],
+        n_chrom=config["n_chrom"],
+    log:
+        f"{BASE}.pansn.log",
+    script:
+        "../../scripts/make_pansn_chromosomes.py"
+
+
+rule compress_pansn:
+    """bgzip + faidx (as pggb requires) and contiguity statistics."""
+    input:
+        pansn=rules.make_pansn_chromosomes.output.pansn,
+    output:
+        gz=f"{BASE}.chroms.pansn.fa.gz",
+        fai=f"{BASE}.chroms.pansn.fa.gz.fai",
+        stats=f"{BASE}.chroms.pansn.stats.txt",
+    threads: 4
+    conda:
+        "../../envs/assembly_stats.yaml"
+    shell:
+        """
+        bgzip -@ {threads} -k -f {input.pansn}
+        samtools faidx {output.gz}
+        stats.sh in={input.pansn} out={output.stats} addname=t extended=t \
+            format=3 -Xmx10g
+        """
+
+
+rule helixer:
+    """Ab initio gene prediction with Helixer (GPU)."""
+    input:
+        fa=rules.rename_sort_fasta.output.sorted_fa,
+        fai=rules.index_and_stats.output.fai,
+    output:
+        gff=f"{BASE}.Helixer.gff3",
+    params:
+        setup=config["helixer"]["setup"],
+        cmd=config["helixer"]["cmd"],
+        lineage=config["helixer"]["lineage"],
+        species=lambda w: f"{w.sample}_{w.hap}",
+    log:
+        f"{BASE}.Helixer.log",
+    threads: config["helixer"]["threads"]
+    resources:
+        gpu=1,
+    shell:
+        """
+        {params.setup}
+        {params.cmd} --lineage {params.lineage} --fasta-path {input.fa} \
+            --species {params.species} --gff-output-path {output.gff} \
+            --no-multiprocess &> {log}
+        """
